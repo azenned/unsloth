@@ -27,6 +27,8 @@ export interface McpServerConfig {
   use_oauth: boolean;
   oauth_client_id?: string | null;
   has_oauth_client_secret?: boolean;
+  oauth_registered_client_id?: string | null;
+  has_oauth_registered_client_secret?: boolean;
   image_input_mappings?: McpImageInputMapping[];
   image_mappings_active?: boolean;
   created_at: string;
@@ -34,6 +36,8 @@ export interface McpServerConfig {
 }
 
 export interface McpServerProbeResult {
+  oauth_registered_client_id?: string | null;
+  has_oauth_registered_client_secret?: boolean;
   ok: boolean;
   tool_count: number;
   error: string | null;
@@ -271,15 +275,28 @@ export function listResearchMcpTools(): Promise<ResearchMcpTool[]> {
   return mcpRequest("/research-tools");
 }
 
-export function testMcpServer(payload: {
+export interface McpOAuthFlow {
+  id: string;
+  authorization_url: string | null;
+  result: McpServerProbeResult | null;
+}
+
+export function completeMcpOAuth(id: string, callbackUrl: string) {
+  return mcpRequest<McpOAuthFlow>(`/oauth/flows/${id}/complete`, {
+    method: "POST", body: { callback_url: callbackUrl },
+  });
+}
+
+export async function testMcpServer(payload: {
   url: string;
   headers?: Record<string, string>;
   useOauth?: boolean;
   oauthClientId?: string | null;
   oauthClientSecret?: string;
   serverId?: string;
+  onOAuthFlow?: (flow: McpOAuthFlow) => boolean;
 }): Promise<McpServerProbeResult> {
-  return mcpRequest("/test", {
+  const request = {
     method: "POST",
     body: {
       url: payload.url,
@@ -289,7 +306,20 @@ export function testMcpServer(payload: {
       oauth_client_secret: payload.oauthClientSecret ?? null,
       server_id: payload.serverId ?? null,
     },
-  });
+  };
+  if (!payload.useOauth || !payload.onOAuthFlow) return mcpRequest("/test", request);
+  let flow = await mcpRequest<McpOAuthFlow>("/oauth/start", request);
+  try {
+    for (let attempt = 0; attempt < 330; attempt++) {
+      if (!payload.onOAuthFlow(flow)) throw new Error("OAuth connection cancelled");
+      if (flow.result) return flow.result;
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      flow = await mcpRequest<McpOAuthFlow>(`/oauth/flows/${flow.id}`);
+    }
+    throw new Error("OAuth connection timed out");
+  } finally {
+    await mcpRequest(`/oauth/flows/${flow.id}`, { method: "DELETE" }).catch(() => {});
+  }
 }
 
 export function decodeMcpStdioCommand(url: string): Promise<McpStdioCommand> {

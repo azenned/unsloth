@@ -42,6 +42,8 @@ import { Switch } from "@/components/ui/switch";
 import { changedImageMappings } from "./api/mcp-image";
 import { subscribeToMcpServerMutationSettlements } from "./api/mcp-server-mutation-tracker";
 import {
+  type McpOAuthFlow,
+  completeMcpOAuth,
   type McpImageInputMapping,
   type McpServerConfig,
   createMcpServer,
@@ -654,6 +656,23 @@ export function ChatMcpServersDialog({
     }
   }
 
+  const [oauthFlow, setOAuthFlow] = useState<McpOAuthFlow | null>(null);
+  const [oauthCallback, setOAuthCallback] = useState("");
+  const [testedRegistration, setTestedRegistration] = useState<{
+    generation: number;
+    url: string;
+    clientId: string;
+    hasSecret: boolean;
+  } | null>(null);
+  const savedOAuthServer = view.kind === "edit" ? servers.find((server) => server.id === view.id) : undefined;
+  const automaticRegistration = form.useOauth && !form.oauthClientId.trim() && !form.oauthClientSecret && (
+    testedRegistration?.generation === formGenerationRef.current && testedRegistration.url === form.url.trim()
+      ? testedRegistration
+      : savedOAuthServer?.url === form.url.trim() && savedOAuthServer.oauth_registered_client_id
+        ? { clientId: savedOAuthServer.oauth_registered_client_id, hasSecret: savedOAuthServer.has_oauth_registered_client_secret ?? false }
+        : null
+  );
+
   async function testConnection() {
     if (!form.url.trim() || form.transport === "unknown") {
       toast.error("Enter an http(s):// URL or a local command first");
@@ -665,7 +684,12 @@ export function ChatMcpServersDialog({
       return;
     }
     const generation = formGenerationRef.current;
+    const authorizationWindow = form.useOauth ? window.open("about:blank", "_blank") : null;
+    if (authorizationWindow) authorizationWindow.opener = null;
+    let authorizationOpened = false;
     setTesting(true);
+    setOAuthFlow(null);
+    setOAuthCallback("");
     try {
       const url = stdio
         ? await encodeStdioForGeneration(
@@ -676,6 +700,15 @@ export function ChatMcpServersDialog({
         : form.url.trim();
       if (url === null || formGenerationRef.current !== generation) return;
       const result = await testMcpServer({
+        onOAuthFlow: (flow) => {
+          if (formGenerationRef.current !== generation) return false;
+          setOAuthFlow(flow);
+          if (flow.authorization_url && authorizationWindow && !authorizationOpened) {
+            authorizationWindow.location.href = flow.authorization_url;
+            authorizationOpened = true;
+          }
+          return true;
+        },
         url,
         headers: headersToObject(form.headers),
         serverId: view.kind === "edit" ? view.id : undefined,
@@ -683,6 +716,12 @@ export function ChatMcpServersDialog({
       });
       if (formGenerationRef.current !== generation) return;
       if (result.ok) {
+        if (result.oauth_registered_client_id) {
+          setTestedRegistration({
+            generation, url, clientId: result.oauth_registered_client_id,
+            hasSecret: result.has_oauth_registered_client_secret ?? false,
+          });
+        }
         toast.success(
           `Connected (${result.tool_count} tool${result.tool_count === 1 ? "" : "s"})`,
         );
@@ -697,7 +736,11 @@ export function ChatMcpServersDialog({
         description: err instanceof Error ? err.message : String(err),
       });
     } finally {
-      if (formGenerationRef.current === generation) setTesting(false);
+      if (authorizationWindow && !authorizationOpened) authorizationWindow.close();
+      if (formGenerationRef.current === generation) {
+        setTesting(false);
+        setOAuthFlow(null);
+      }
     }
   }
 
@@ -1102,8 +1145,20 @@ export function ChatMcpServersDialog({
 
             {form.transport === "http" && form.useOauth && (
               <div className="grid gap-3 rounded-lg border p-3">
+                {automaticRegistration && (
+                  <div className="grid gap-2">
+                    <Label htmlFor="mcp-oauth-registered-id">Registered OAuth client ID</Label>
+                    <Input id="mcp-oauth-registered-id" value={automaticRegistration.clientId} readOnly />
+                    <p className="text-xs text-muted-foreground">
+                      {automaticRegistration.hasSecret
+                        ? "Client ID and secret are saved securely on the server and reused automatically."
+                        : "Client ID is saved securely on the server and reused automatically. This provider did not issue a client secret."}
+                    </p>
+                  </div>
+                )}
+                <p className="text-xs text-muted-foreground">The fields below are only for a client registered in advance. Leave them blank for automatic OAuth registration.</p>
                 <div className="grid gap-2">
-                  <Label htmlFor="mcp-oauth-client-id">OAuth client ID</Label>
+                  <Label htmlFor="mcp-oauth-client-id">Pre-registered OAuth client ID</Label>
                   <Input
                     id="mcp-oauth-client-id"
                     value={form.oauthClientId}
@@ -1160,6 +1215,26 @@ export function ChatMcpServersDialog({
                 stdio={addressIsCommand}
                 disabled={formPending}
               />
+            )}
+
+            {testing && oauthFlow?.authorization_url && (
+              <div className="space-y-2 rounded-md border p-3">
+                <a href={oauthFlow.authorization_url} target="_blank" rel="noopener noreferrer" className="text-sm underline">
+                  Authorize MCP connection
+                </a>
+                <p className="text-xs text-muted-foreground">
+                  After authorizing, if the connection does not finish automatically, paste the complete callback URL below.
+                </p>
+                <Input aria-label="OAuth callback URL" value={oauthCallback} onChange={(event) => setOAuthCallback(event.target.value)} placeholder="Paste the complete OAuth callback URL" />
+                <Button type="button" variant="outline" size="sm" disabled={!oauthCallback.trim()} onClick={async () => {
+                  try {
+                    await completeMcpOAuth(oauthFlow.id, oauthCallback.trim());
+                    setOAuthCallback("");
+                  } catch (error) {
+                    toast.error(error instanceof Error ? error.message : String(error));
+                  }
+                }}>Complete authorization</Button>
+              </div>
             )}
 
             <div className="flex items-center justify-between gap-2 pt-2">

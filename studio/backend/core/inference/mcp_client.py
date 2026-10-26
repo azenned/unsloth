@@ -526,6 +526,14 @@ def _oauth(
 ):
     from fastmcp.client.auth import OAuth
 
+    from core.inference.mcp_oauth import active_flow, browser_oauth_class, public_callback_url, public_oauth_class
+
+    flow = active_flow.get()
+    if public_callback_url():
+        OAuth = public_oauth_class()
+    elif flow is not None:
+        OAuth = browser_oauth_class()
+
     # A pre-registered client skips Dynamic Client Registration (Google's MCP servers have no /register).
     auth = OAuth(
         mcp_url = url,
@@ -533,6 +541,8 @@ def _oauth(
         client_id = oauth_client_id,
         client_secret = oauth_client_secret,
     )
+    if flow is not None:
+        auth.studio_flow = flow
     _strip_client_id_under_basic_auth(auth)
     return auth
 

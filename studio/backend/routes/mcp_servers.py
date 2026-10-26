@@ -10,6 +10,7 @@ from urllib.parse import urlparse
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, Field
 from integrations.blender import service as blender
 from models.mcp_servers import BlenderSettings, BlenderSetup, McpBuiltinResponse
 
@@ -184,6 +185,9 @@ def _oauth_client(
 
 
 def _row_to_response(row: dict, *, include_headers: bool = True) -> McpServerResponse:
+    from core.inference.mcp_oauth import oauth_registration_status
+
+    registration = oauth_registration_status(row["url"]) if row.get("use_oauth") else {}
     return McpServerResponse(
         id = row["id"],
         builtin_id = row.get("builtin_id"),
@@ -194,6 +198,7 @@ def _row_to_response(row: dict, *, include_headers: bool = True) -> McpServerRes
         use_oauth = bool(row.get("use_oauth")),
         oauth_client_id = row.get("oauth_client_id"),
         has_oauth_client_secret = bool(row.get("oauth_client_secret")),
+        **registration,
         image_input_mappings = image_input_mappings(row),
         image_mappings_active = _image_mappings_active(row),
         created_at = row["created_at"],
@@ -652,6 +657,80 @@ async def import_mcp_servers(
     return McpServerImportResult(created = created, skipped = skipped, errors = errors)
 
 
+class McpOAuthCallback(BaseModel):
+    callback_url: str = Field(min_length = 1, max_length = 8192)
+
+
+@router.post("/oauth/start")
+async def start_mcp_oauth(
+    payload: McpServerTestRequest,
+    current_subject: str = Depends(get_current_subject),
+    via_api_key: ViaApiKey = False,
+):
+    from core.inference.mcp_oauth import OAuthFlow, active_flow, flows, prune
+    from utils.account_context import current_account_id
+
+    _validate_url(payload.url)
+    if not payload.use_oauth or is_stdio(payload.url):
+        raise HTTPException(status_code = 400, detail = "OAuth requires an HTTP MCP server")
+    prune()
+    account = current_account_id()
+    if sum(f.account == account and f.result is None for f in flows.values()) >= 4:
+        raise HTTPException(status_code = 429, detail = "Too many pending OAuth flows")
+    flow = OAuthFlow(account = account, subject = current_subject)
+    flows[flow.id] = flow
+
+    async def run():
+        token = active_flow.set(flow)
+        try:
+            result = await asyncio.wait_for(test_mcp_server(payload, current_subject, via_api_key), 310)
+            flow.result = result.model_dump()
+        except Exception:
+            flow.result = {"ok": False, "tool_count": 0, "error": "OAuth connection failed or timed out"}
+        finally:
+            if flow.callback and not flow.callback.done():
+                flow.callback.cancel()
+            active_flow.reset(token)
+
+    flow.task = asyncio.create_task(run())
+    return flow.snapshot()
+
+
+def _mcp_oauth_flow(flow_id, subject):
+    from core.inference.mcp_oauth import flows, prune
+    from utils.account_context import current_account_id
+
+    prune()
+    flow = flows.get(flow_id)
+    if flow is None or flow.account != current_account_id() or flow.subject != subject:
+        raise HTTPException(status_code = 404, detail = "OAuth flow not found or expired")
+    return flow
+
+
+@router.get("/oauth/flows/{flow_id}")
+async def mcp_oauth_status(flow_id: str, current_subject: str = Depends(get_current_subject)):
+    return _mcp_oauth_flow(flow_id, current_subject).snapshot()
+
+
+@router.post("/oauth/flows/{flow_id}/complete")
+async def complete_mcp_oauth(flow_id: str, payload: McpOAuthCallback, current_subject: str = Depends(get_current_subject)):
+    flow = _mcp_oauth_flow(flow_id, current_subject)
+    try:
+        flow.complete(payload.callback_url)
+    except (ValueError, KeyError) as exc:
+        raise HTTPException(status_code = 400, detail = str(exc)) from exc
+    return flow.snapshot()
+
+
+@router.delete("/oauth/flows/{flow_id}", status_code = 204)
+async def cancel_mcp_oauth(flow_id: str, current_subject: str = Depends(get_current_subject)):
+    from core.inference.mcp_oauth import flows
+
+    flow = _mcp_oauth_flow(flow_id, current_subject)
+    flow.task.cancel()
+    flows.pop(flow.id, None)
+
+
 @router.post("/test", response_model = McpServerProbeResult)
 async def test_mcp_server(
     payload: McpServerTestRequest,
@@ -685,12 +764,14 @@ async def test_mcp_server(
     except Exception as exc:  # noqa: BLE001
         logger.error(
             "mcp_servers.test_failed",
-            error = str(exc),
-            exc_info = True,
+            error_type = type(exc).__name__,
         )
-        return McpServerProbeResult(ok = False, error = safe_curated_detail(exc))
+        return McpServerProbeResult(ok = False, error = "OAuth connection failed" if use_oauth else safe_curated_detail(exc))
 
-    return McpServerProbeResult(ok = True, tool_count = len(tools))
+    from core.inference.mcp_oauth import oauth_registration_status
+
+    registration = oauth_registration_status(url) if use_oauth else {}
+    return McpServerProbeResult(ok = True, tool_count = len(tools), **registration)
 
 
 _UI_TIMEOUT = 60.0

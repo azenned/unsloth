@@ -58,6 +58,8 @@ class McpServerResponse(BaseModel):
     use_oauth: bool = False
     oauth_client_id: Optional[str] = None
     has_oauth_client_secret: bool = False
+    oauth_registered_client_id: Optional[str] = None
+    has_oauth_registered_client_secret: bool = False
     image_input_mappings: list[McpImageInputMapping] = Field(default_factory = list)
     # False when no mapping matches a cached tool schema any more; true while the tools are unknown.
     image_mappings_active: bool = False
@@ -115,6 +117,8 @@ class McpStdioEncodeResponse(BaseModel):
 
 
 class McpServerProbeResult(BaseModel):
+    oauth_registered_client_id: Optional[str] = None
+    has_oauth_registered_client_secret: bool = False
     ok: bool
     tool_count: int = 0
     error: Optional[str] = None

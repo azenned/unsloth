@@ -414,6 +414,8 @@ from hub.utils.download_registry import (
     reap_orphan_workers as reap_hub_orphan_workers,
     terminate_active_downloads as terminate_hub_downloads,
 )
+from routes.mcp_oauth import router as mcp_oauth_router
+from core.inference.mcp_oauth import OAuthCallbackOriginMiddleware, public_callback_url
 from routes.settings import router as settings_router
 from routes.sandbox_capability import router as sandbox_capability_router
 from routes.systemone import MCP_PATH as DECISIONS_MCP_PATH, RequireStudioAuth, decisions_mcp
@@ -1827,6 +1829,8 @@ app.add_middleware(RemoteAccessStopResponseMiddleware)
 
 from auth.x_api_key import XApiKeyMiddleware  # noqa: E402
 
+app.add_middleware(OAuthCallbackOriginMiddleware)
+
 # Added last so it is outermost: every Authorization reader below sees the rewritten header.
 app.add_middleware(XApiKeyMiddleware)
 
@@ -1866,6 +1870,8 @@ app.include_router(openai_codex_auth_router, prefix = "/api/providers", tags = [
 
 app.include_router(settings_router, prefix = "/api/settings", tags = ["settings"])
 app.include_router(sandbox_capability_router, prefix = "/api/sandbox", tags = ["sandbox"])
+public_callback_url()  # Fail startup on an invalid public OAuth origin.
+app.include_router(mcp_oauth_router, tags = ["mcp"])
 app.include_router(mcp_servers_router, prefix = "/api/mcp/servers", tags = ["mcp"])
 app.include_router(skills_router, prefix = "/api/skills", tags = ["skills"])
 app.include_router(prompts_router, prefix = "/api/prompts", tags = ["prompts"])
